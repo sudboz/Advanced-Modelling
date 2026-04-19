@@ -1,0 +1,917 @@
+---
+title: "Final_Advanced_Modeling"
+author: "Sude Boz 100569570"
+format: html
+editor: visual
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+This project is using the `war economic impact` dataset from kaggle. The dataset consists 100,000 observations of conflicts with 28 variables such as socioeconomic indicators such as unemployment, poverty, inflation, and black market activity; and information about conflicts across different regions, types, and time periods.
+
+The goal is to apply supervised learning techniques in two tasks:
+
+-   **Classification**: predict the level of black market activity (`Black_Market_Activity_Level`: Low, Moderate, High, Dominant)
+-   **Regression**: predict the percentage change in GDP during the conflict (`GDP_Change`)
+
+```{r libraries}
+#libraries
+library(tidyverse)
+library(DataExplorer)
+library(ggplot2)
+library(knitr)
+library(caret)
+library(MASS)
+library(e1071)
+library(tree)
+library(randomForest)
+library(olsrr)
+library(pls)
+```
+
+```{r setting up the dataset}
+data_original <- read_csv("war_economic_impact_dataset.csv")
+```
+
+```{r understanding the data}
+dim(data_original)
+glimpse(data_original)
+summary(data_original)
+```
+
+```{r missing value visualization}
+# missing values
+plot_missing(data_original)
+```
+
+## Data Cleaning
+
+The dataset contains 100,000 observations and this might create difficulties in modelling in terms of time. Due to the computational cost of modelling on 100,000 observations, a random sample of 5,000 was drawn using a fixed seed (2026) for reproducibility, which remains well above the required threshold.
+
+```{r}
+# Keep a representative random sample for computational efficiency
+set.seed(2026)
+data <- data_original |> sample_n(5000)
+```
+
+### Checking missing and duplicates
+
+```{r missing-duplicates}
+cat("NAs in data:", sum(is.na(data)), "\n")
+cat("Duplicated rows:", sum(duplicated(data)), "\n")
+```
+
+No missing values or duplicated rows are found, so no imputation or deduplication is needed.
+
+### Rename Columns
+
+Column names with `%` symbols can cause issues in R. We rename them to clean names.
+
+```{r rename}
+data <- data |> 
+  rename(
+    Pre_War_Unemployment     = `Pre_War_Unemployment_%`,
+    During_War_Unemployment  = `During_War_Unemployment_%`,
+    Unemployment_Spike       = `Unemployment_Spike_Percentage_Points`,
+    Youth_Unemployment_Change = `Youth_Unemployment_Change_%`,
+    Pre_War_Poverty          = `Pre_War_Poverty_Rate_%`,
+    During_War_Poverty       = `During_War_Poverty_Rate_%`,
+    Extreme_Poverty          = `Extreme_Poverty_Rate_%`,
+    Food_Insecurity          = `Food_Insecurity_Rate_%`,
+    GDP_Change               = `GDP_Change_%`,
+    Inflation_Rate           = `Inflation_Rate_%`,
+    Currency_Devaluation     = `Currency_Devaluation_%`,
+    Informal_PreWar          = `Informal_Economy_Size_Pre_War_%`,
+    Informal_During          = `Informal_Economy_Size_During_War_%`,
+    Black_Market_Gap         = `Currency_Black_Market_Rate_Gap_%`
+  )
+
+cat("Columns after renaming:\n")
+names(data)
+```
+
+## Derived Variable: Conflict Duration
+
+We create a new variable representing the duration of each conflict in years, which may be a useful predictor:
+
+```{r duration}
+data <- data |>
+  mutate(Conflict_Duration = End_Year - Start_Year)
+
+cat("Conflict_Duration range:", min(data$Conflict_Duration), "to", max(data$Conflict_Duration), "years\n")
+```
+
+# EDA
+
+### Distribution of continuous variables and GDP_Change
+
+```{r}
+plot_histogram(data)
+plot_histogram(data$GDP_Change)
+```
+
+All GDP values are between -85 and -5. We can say that in every terms the wars has narrowed the economy.
+
+`Cost_of_War_USD`, `Estimated_Reconstruction_Cost_USD` and `Households_Fallen_Into_Poverty_Estimate` show heavy right skew. These variables will be log-transformed before advanced regression modelling.
+
+### Distribution of discrete variables and Black Market activity level
+
+```{r}
+plot_bar(data)
+plot_bar(data$Black_Market_Activity_Level)
+```
+
+-   The four classes show an approximately equal distribution between classes of Black Market Activity Level.
+
+-   The Middle East is the most represented region, followed by Europe.
+
+-   In terms of status, most of them are resolved.
+
+### GDP Change by Conflict Type (boxplot)
+
+```{r}
+data |> 
+  ggplot(aes(x = Conflict_Type, y = GDP_Change)) +
+  geom_boxplot(fill = "blue") +
+  labs(title = "GDP Change by Conflict Type",
+       x = "Conflict Type", y = "GDP Change (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+Asymmetric war can be easily differentiated compared to other conflict types. Since GDP Change drops deeply by observing the median is around -70, and its ranges are more narrow. This means asymmetric wars have a more consistent and destructive impact on the economy. The other conflict types similar to each other with median around -28 and there does not appear to be a significant difference between these groups in terms of GDP decline.
+
+### Inflation by Region (boxplot)
+
+```{r}
+data |> 
+  ggplot(aes(x = Region, y = Inflation_Rate)) +
+  geom_boxplot(fill = "red") +
+  labs(title = "Inflation by Region",
+       x = "Region", y = "Inflation Rate") +
+  theme_minimal() 
+```
+
+All regions have similar distribution with median around 70. This suggests that the region does not have a distinctive effect on the inflation rate. However, there are numerous outliers in all regions.
+
+### Unemployment Spike vs GDP Change (scatter)
+
+```{r}
+data |> 
+  ggplot(aes(x = Unemployment_Spike, y = GDP_Change)) +
+  geom_point(alpha = 0.1, color = "steelblue", size = 0.8) +
+  geom_smooth(method = "lm", formula = y ~ x, color = "firebrick", se = FALSE) +
+  labs(title = "Unemployment Spike vs GDP Change",
+       x = "Unemployment Spike (percentage points)", y = "GDP Change (%)") +
+  theme_minimal()
+```
+
+The plot shows a negative relationship between GDP Change and Unemployment Spike. As unemployment spike increases, the decline in GDP becomes deeper. Furthermore, point cloud is very wide, for every unemployment spike value, GDP Change spreads across a very broad range between -85 and -5. Other than this, there is concentration on the left side, this means the vast majority of observations are clustered at low unemployment spike values (0-20), while data becomes sparse at higher values (60+), meaning the trend line on the right side is less reliable.
+
+Overall, there is a weak but meaningful negative relationship between the two variables, which justifies including `Unemployment_Spike` as a predictor in the regression models.
+
+### Correlation Matrix
+
+```{r}
+GGally::ggcorr(dplyr::select(data, where(is.numeric), -Start_Year, -End_Year), label = TRUE)
+```
+
+Strong positive correlations:
+
+-   `Inflation_Rate` and `Currency_Devaluation` have 0.8 correlation
+
+-   `During_War_Poverty` and `Extreme_Poverty` have 0.9 correlation
+
+-   `During_War_Poverty` and `Pre_War_Poverty` have 0.5 correlation
+
+-   `During_War_Unemployment` and `Unemployment_Spike` have 1.0 correlation
+
+-   `Youth_Unemployment_Change` and `Unemployment_Spike` have 0.7 correlation
+
+-   `Informal_PreWar` and `Informal_During` have 0.5 correlation
+
+Negative correlations:
+
+-   `GDP_Change` and `Informal_During` have 0.2 correlation
+
+-   `Food_Insecurity` and `GDP_Change` have -0.2 correlation
+
+-   `Youth_Unemployment_Change` and `GDP_Change` have -0.2 correlation
+
+Based on the correlation analysis, we remove highly correlated variables to avoid multicollinearity. We also remove free-text identifier columns that carry no predictive information. The following variables are kept: `Unemployment_Spike` from the unemployment group since it is the most direct measure of war's impact on employment, `During_War_Poverty` from the poverty group since it is most directly relevant to war's economic impact, and `Informal_During` from the informal economy group since it is more relevant during conflict.
+
+```{r}
+# Removing redundant and text variables
+data <- data |> 
+    dplyr::select(-c(During_War_Unemployment,
+                     Youth_Unemployment_Change,
+                     Extreme_Poverty, 
+                     Pre_War_Poverty,
+                     Informal_PreWar,
+                     Currency_Devaluation, 
+                     Conflict_Name,                #since they are unique text
+                     Primary_Country,              #text
+                     Primary_Black_Market_Goods )) #text
+
+# Convert remaining character columns to factors
+data <- data |> 
+  mutate(
+    Conflict_Type            = as.factor(Conflict_Type),
+    Region                   = as.factor(Region),
+    Status                   = as.factor(Status),
+    Most_Affected_Sector     = as.factor(Most_Affected_Sector),
+    War_Profiteering_Documented = as.factor(War_Profiteering_Documented),
+    Black_Market_Activity_Level = as.factor(Black_Market_Activity_Level)
+  )
+```
+
+## Class Balance of Target Variables
+
+Before modelling, it is important to understand the distribution of our two target variables.
+
+For the **classification target**, we check whether the classes are balanced:
+
+```{r class-balance}
+cat("Black Market Activity Level distribution:\n")
+prop.table(table(data$Black_Market_Activity_Level))
+```
+
+The four classes of Black_Market_Activity_Level are approximately equally distributed around 25% each, so no resampling technique is required.
+
+For the **regression target**, we look at the summary of `GDP_Change`:
+
+```{r gdp-summary}
+summary(data$GDP_Change)
+```
+
+We are not applying a log transformation to `GDP_Change` because log transformation requires strictly positive values, and our variable ranges from -84.94 to -5.01. In addition, it is already on a bounded, interpretable scale since it does not have extreme range.
+
+### Train and Test Split
+
+```{r}
+set.seed(2026)
+in_train <- createDataPartition(data$Black_Market_Activity_Level, p = 0.8, list = FALSE)
+train_df <- data[in_train, ]
+test_df  <- data[-in_train, ]
+
+cat("Training set:", nrow(train_df), "observations\n")
+cat("Test set:", nrow(test_df), "observations\n")
+```
+
+# Classification (emphasis on interpretation)
+
+Since `Black_Market_Activity_Level` has 4 classes, we simplify it into a binary variable to enable logistic regression and ensure comparability across all classification models.
+
+### Create the binary target
+
+```{r Create the binary target}
+train_df <- train_df |> 
+  mutate(BM_High = factor(
+    Black_Market_Activity_Level %in% c("High", "Dominant"),
+    levels = c(FALSE, TRUE),
+    labels = c("Low_Moderate", "High_Dominant")))
+
+test_df <- test_df |> 
+  mutate(BM_High = factor(
+    Black_Market_Activity_Level %in% c("High", "Dominant"),
+    levels = c(FALSE, TRUE),
+    labels = c("Low_Moderate", "High_Dominant")
+  ))
+
+cat("Binary target distribution:\n")
+prop.table(table(train_df$BM_High))
+```
+
+### Fitting full logistic regression + stepwise selection
+
+```{r Fitting full logistic regression + stepwise selection}
+
+logit_full <- glm(BM_High ~ . -Black_Market_Activity_Level -GDP_Change,
+                  family = binomial(link = "logit"),
+                  data = train_df)
+logit_model <- step(logit_full, direction = "both", trace = 0)
+
+selected_terms <- attr(terms(logit_model), "term.labels")
+selected_formula <- as.formula(paste("BM_High ~", paste(selected_terms, collapse = " + ")))
+
+cat("Selected predictors:", paste(selected_terms, collapse = ", "), "\n")
+```
+
+Stepwise selection identified three predictors: `Pre_War_Unemployment`, `Informal_During`, and `Black_Market_Gap` — the only variables that contributed meaningful information beyond what the others already explain.
+
+### Interpret coefficients
+
+```{r Interpret coefficients}
+summary(logit_model)
+```
+
+Coefficients:
+
+-   `Pre_War_Unemployment`: Estimate is 0.0195 and p-value is 0.031 which is statistically significant. This means countries with higher pre-war unemployment are more likely to develop high/dominant black market activity.
+
+-   `Black_Market_Gap`: Estimate is 0.0008, and p-value is 0.004 which is statistically significant and the strongest predictor. A larger gap between official and black market currency rates is associated with higher black market activity levels. This is almost tautological but confirms the variable is consistent.
+
+-   `Informal_During`: Estimate is -0.0032, and p-value is 0.109 which is not statistically significant, since p \> 0.05.
+
+-   Intercept: not statistically significant.
+
+**Model Fit**
+
+Null deviance is 5546.5 and Residual deviance is 5533.6. Very small reduction between them, this means the model explains very little variance. Therefore, it may suggest black market activity is hard to predict with these variables alone using a linear approach.
+
+AIC: 5541.6
+
+### Predict and evaluate
+
+```{r Predict and evaluate}
+
+logit_prob <- predict(logit_model, newdata = test_df, type = "response")
+logit_pred <- factor(ifelse(logit_prob > 0.5, "High_Dominant",
+                            "Low_Moderate"),
+                     levels = c("Low_Moderate", "High_Dominant"))
+
+
+cm_logit <- confusionMatrix(logit_pred, test_df$BM_High, positive = "High_Dominant")
+cm_logit
+
+```
+
+Confusion Matrix:
+
+-   333 correctly predicted as Low_Moderate
+
+-   167 correctly predicted as High_Dominant
+
+-   323 predicted Low_Moderate but actually High_Dominant
+
+-   175 predicted High_Dominant but actually Low_Moderate
+
+Key Metrics:
+
+-   Accuracy: 0.501, we can say it is essentially 50% which is no better than random guessing
+
+-   Balanced Accuracy: 0.498 which is almost exactly 0.5
+
+-   Sensitivity: 0.341. This means the model only correctly identifies 34% of actual High_Dominant cases, and it is very low.
+
+-   Specificity: 0.656. We can say that it is better at identifying Low_Moderate cases.
+
+Overall, we can say that **the logistic regression** performs **very poorly**. This is consistent with the null vs residual deviance difference being so small, meaning these three predictors (`Pre_War_Unemployment`, `Informal_During`, `Black_Market_Gap`) do not linearly separate the two classes well.
+
+# Classification (emphasis on modelling and prediction)
+
+To run the logistic model above, we simplified the classification target variable into binary (BM_High). We continue with this binary target in this step as well for consistency, as all models will be predicting the same outcome and results will be directly comparable across methods. The selected predictors from the stepwise logistic regression (`Pre_War_Unemployment`, `Informal_During`, `Black_Market_Gap`) are also kept as the feature set for all models.
+
+```{r selected formula}
+selected_formula = BM_High ~ Pre_War_Unemployment + Informal_During + Black_Market_Gap
+```
+
+## 1. LDA
+
+```{r LDA}
+lda_model <- lda(selected_formula, data = train_df)
+lda_pred <- predict(lda_model, newdata = test_df)$class
+
+cm_lda <- confusionMatrix(lda_pred, test_df$BM_High, positive = "High_Dominant")
+cm_lda
+```
+
+Key Metrics
+
+```         
+Accuracy : 0.5
+Balanced Accuracy : 0.4971
+Sensitivity : 0.3388
+Specificity : 0.6555
+```
+
+We observe that LDA almost identically performs as logistic regression. This is expected since LDA is also a linear classifier and the classes don't separate linearly with these three predictors.
+
+## 2. QDA
+
+```{r QDA}
+
+qda_model <- qda(selected_formula, data = train_df)
+qda_pred <- predict(qda_model, newdata = test_df)$class
+
+cm_qda <- confusionMatrix(qda_pred, test_df$BM_High, positive = "High_Dominant")
+cm_qda
+```
+
+Key Metrics:
+
+```         
+Accuracy : 0.508  
+Balanced Accuracy : 0.5061
+Sensitivity : 0.4020
+Specificity : 0.6102
+```
+
+QDA performs slightly better than LDA with a Balanced Accuracy of 0.506, suggesting that allowing quadratic decision boundaries provides a marginal improvement, though the gain is negligible.
+
+## 3. Naive Bayes
+
+```{r}
+nb_model <- naiveBayes(selected_formula, data = train_df)
+nb_pred <- predict(nb_model, newdata = test_df)
+
+cm_nb <- confusionMatrix(nb_pred, test_df$BM_High, positive = "High_Dominant")
+cm_nb
+```
+
+Key Metrics
+
+```         
+Accuracy : 0.5321
+Balanced Accuracy : 0.5280
+Sensitivity : 0.3020          
+Specificity : 0.7539
+```
+
+Naive Bayes is slightly better than LDA and QDA. Still weak but showing a small improvement. Notably Specificity is 0.754 which means it is quite good at identifying Low_Moderate cases, but Sensitivity is only 0.302 so it misses a lot of High_Dominant cases.
+
+## 4. k-NN with CV tuning + scree plot
+
+```{r}
+ctrl_knn <- trainControl(method = "cv", number = 5)
+knn_grid <- data.frame(k = c(1, 3, 5, 7, 9, 11, 15, 20))
+
+knn_model <- train(
+  selected_formula,
+  data = train_df,
+  method = "knn",
+  preProcess = c("center", "scale"),
+  trControl = ctrl_knn,
+  tuneGrid = knn_grid,
+  metric = "Accuracy"
+)
+
+knn_pred <- predict(knn_model, newdata = test_df)
+
+cm_knn <- confusionMatrix(knn_pred, test_df$BM_High, positive = "High_Dominant")
+cm_knn
+
+# Best k
+best_k <- knn_model$bestTune$k
+cat("Best k selected by CV:", best_k, "\n")
+
+# Scree plot
+ggplot(knn_model$results, aes(x = k, y = Accuracy)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_vline(xintercept = best_k, linetype = "dashed", color = "red") +
+  labs(title = "k-NN Tuning",
+       subtitle = "Cross-validated accuracy by k",
+       x = "k", y = "CV Accuracy") +
+  theme_minimal()
+```
+
+Key Metrics
+
+```         
+Accuracy : 0.506
+Balanced Accuracy : 0.5062
+Sensitivity : 0.5143          
+Specificity : 0.4980
+Best k selected by CV: 3 
+```
+
+k-NN with k=3 achieves a Balanced Accuracy of 0.506, similar to LDA and QDA. The scree plot shows accuracy peaking at k=3 before declining, confirming this as the optimal neighbourhood size.
+
+## 5. Decision Tree
+
+Cross-validation via `cv.tree()` failed because during the cross-validation folds the tree collapsed to a single node — a known limitation of the `tree` package when the classes are difficult to separate. Since all previous models also showed weak separability of the binary target, this is consistent with the overall pattern observed. Instead, we manually pruned the tree to a size of 10 terminal nodes, which provides a balance between complexity and interpretability.
+
+```{r}
+tree_formula <- BM_High ~ . - Black_Market_Activity_Level - GDP_Change
+
+tree_model <- tree(tree_formula, 
+                   data = train_df,
+                   control = tree.control(nobs = nrow(train_df),
+                                         mincut = 5,
+                                         minsize = 10,
+                                         mindev = 0.001))
+
+summary(tree_model)
+
+# Manually prune to size 10
+tree_pruned <- prune.misclass(tree_model, best = 10)
+
+# Plot the pruned tree
+plot(tree_pruned)
+text(tree_pruned, pretty = 0, cex = 0.7)
+
+# Predict
+tree_pred <- predict(tree_pruned, newdata = test_df, type = "class")
+
+cm_tree <- confusionMatrix(tree_pred, test_df$BM_High, positive = "High_Dominant")
+cm_tree
+```
+
+**Tree structure:** 93 terminal nodes, using 13 variables — `Households_Fallen_Into_Poverty_Estimate`, `Pre_War_Unemployment`, `Black_Market_Gap` are the most prominent splits visible in the tree plot.
+
+Key metrics:
+
+```         
+Accuracy : 0.542
+Balanced Accuracy : 0.540
+Sensitivity : 0.416
+Specificity : 0.663
+```
+
+The Decision Tree is the best performing model so far with a Balanced Accuracy of 0.540 and an accuracy that is statistically significantly better than random guessing (p = 0.019).
+
+## 6. Bagging
+
+```{r}
+p <- ncol(train_df) - 3  # number of predictors (excluding BM_High, Black_Market_Activity_Level, GDP_Change)
+
+bagging_model <- randomForest(BM_High ~ . - Black_Market_Activity_Level - GDP_Change,
+                               data = train_df,
+                               mtry = p,
+                               importance = TRUE)
+
+bagging_pred <- predict(bagging_model, newdata = test_df)
+
+cm_bagging <- confusionMatrix(bagging_pred, test_df$BM_High, positive = "High_Dominant")
+cm_bagging
+```
+
+Key Metrics:
+
+```         
+Accuracy : 0.519
+Balanced Accuracy : 0.5180
+Sensitivity : 0.4592          
+Specificity : 0.5768
+```
+
+Bagging achieves a Balanced Accuracy of 0.518 — worse than the Decision Tree. This is surprising but can occur when bagging averages many weak trees and the signal in the data is very weak.
+
+## 7. Random Forest
+
+```{r}
+rf_model <- randomForest(BM_High ~ . - Black_Market_Activity_Level - GDP_Change,
+                          data = train_df,
+                          mtry = floor(sqrt(p)),
+                          importance = TRUE)
+
+rf_pred <- predict(rf_model, newdata = test_df)
+
+cm_rf <- confusionMatrix(rf_pred, test_df$BM_High, positive = "High_Dominant")
+cm_rf
+
+# Variable importance plot
+varImpPlot(rf_model, main = "Random Forest: Variable Importance")
+```
+
+Key Metrics:
+
+```         
+Accuracy : 0.5411
+Balanced Accuracy : 0.5400
+Sensitivity : 0.4816          
+Specificity : 0.5984
+```
+
+Random Forest achieves a Balanced Accuracy of 0.540, matching the Decision Tree as the best performing model. Both are the only models that statistically outperform random guessing.
+
+Variable Importance plot tells us:
+
+-   **MeanDecreaseAccuracy**: `Start_Year` and `Conflict_Duration` are the most important. Removing them hurts accuracy the most
+
+-   **MeanDecreaseGini**: `Households_Fallen_Into_Poverty_Estimate`, `Black_Market_Gap`, `Inflation_Rate` contribute most to node purity
+
+## Comparison table + bar chart
+
+```{r}
+extract_metrics <- function(cm_object) {
+  tibble(
+    Accuracy          = as.numeric(cm_object$overall["Accuracy"]),
+    Sensitivity       = as.numeric(cm_object$byClass["Sensitivity"]),
+    Specificity       = as.numeric(cm_object$byClass["Specificity"]),
+    Balanced_Accuracy = as.numeric(cm_object$byClass["Balanced Accuracy"])
+  )
+}
+
+results <- bind_rows(
+  extract_metrics(cm_logit)   |> mutate(Model = "Logistic Regression"),
+  extract_metrics(cm_lda)     |> mutate(Model = "LDA"),
+  extract_metrics(cm_qda)     |> mutate(Model = "QDA"),
+  extract_metrics(cm_nb)      |> mutate(Model = "Naive Bayes"),
+  extract_metrics(cm_knn)     |> mutate(Model = paste0("k-NN (k=", best_k, ")")),
+  extract_metrics(cm_tree)    |> mutate(Model = "Decision Tree"),
+  extract_metrics(cm_bagging) |> mutate(Model = "Bagging"),
+  extract_metrics(cm_rf)      |> mutate(Model = "Random Forest")
+) |> dplyr::select(Model, Accuracy, Sensitivity, Specificity, Balanced_Accuracy)
+
+kable(results, digits = 3)
+
+# Bar chart
+results |>
+  dplyr::select(Model, Accuracy, Balanced_Accuracy) |>
+  pivot_longer(cols = c(Accuracy, Balanced_Accuracy),
+               names_to = "Metric", values_to = "Value") |>
+  ggplot(aes(x = reorder(Model, Value), y = Value, fill = Metric)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  ylim(0, 1) +
+  labs(title = "Classification Model Comparison",
+       x = "Model", y = "Score") +
+  theme_minimal()
+```
+
+### Overall Findings
+
+-   **Decision Tree and Random Forest** are the best performing models with Balanced Accuracy of 0.540 — the only models that statistically beat random guessing (p \< 0.05)
+
+-   **LDA is the worst** with Balanced Accuracy 0.497
+
+-   **All models perform poorly overall** — the range is very narrow (0.497 to 0.540), confirming that `BM_High` is a very difficult target to predict from these economic indicators
+
+-   **Naive Bayes** has the highest Specificity (0.754) — best at identifying Low_Moderate cases — but the worst Sensitivity (0.302)
+
+-   **k-NN** has the most balanced Sensitivity/Specificity trade-off (0.514 / 0.498)
+
+-   The bar chart clearly shows **Decision Tree and Random Forest on top**, followed by Naive Bayes, with linear models clustered at the bottom
+
+# Advanced Regression (emphasis on interpretation)
+
+## Feature engineering and baseline model
+
+Three variables (`Cost_of_War_USD`, `Estimated_Reconstruction_Cost_USD`, `Households_Fallen_Into_Poverty_Estimate`) showed heavy right skew in the EDA. We apply log transformation to these before regression modelling. We also create separate regression datasets (`train_reg`, `test_reg`) by removing classification-related columns, keeping the original `train_df` and `test_df` untouched for the classification steps.
+
+```{r}
+# Log-transform skewed predictors
+train_reg <- train_df |> 
+  mutate(
+    log_Cost_of_War              = log(Cost_of_War_USD),
+    log_Reconstruction_Cost      = log(Estimated_Reconstruction_Cost_USD),
+    log_Households_Poverty       = log(Households_Fallen_Into_Poverty_Estimate + 1)
+  ) |>
+  dplyr::select(-Cost_of_War_USD, 
+                -Estimated_Reconstruction_Cost_USD,
+                -Households_Fallen_Into_Poverty_Estimate,
+                -Black_Market_Activity_Level,
+                -BM_High,
+                -Conflict_Duration)
+
+test_reg <- test_df |>
+  mutate(
+    log_Cost_of_War              = log(Cost_of_War_USD),
+    log_Reconstruction_Cost      = log(Estimated_Reconstruction_Cost_USD),
+    log_Households_Poverty       = log(Households_Fallen_Into_Poverty_Estimate + 1)
+  ) |>
+  dplyr::select(-Cost_of_War_USD,
+                -Estimated_Reconstruction_Cost_USD,
+                -Households_Fallen_Into_Poverty_Estimate,
+                -Black_Market_Activity_Level,
+                -BM_High,
+                -Conflict_Duration)
+```
+
+## Baseline linear model
+
+```{r Baseline linear model and Test R^2}
+lm_model <- lm(GDP_Change ~ ., data = train_reg)
+summary(lm_model)
+
+# Test R^2
+lm_pred <- predict(lm_model, newdata = test_reg)
+lm_r2 <- cor(lm_pred, test_reg$GDP_Change)^2
+cat("Test R^2:", round(lm_r2, 4), "\n")
+```
+
+Note: `RegionSouth Asia` was automatically dropped by R due to perfect multicollinearity with the other region dummy variables. This does not affect the validity of the model.
+
+**Significant coefficients:**
+
+-   `Conflict_TypeCivil War`: Estimate is 44.15 and p-value is \< 2e-16. This means that compared to the reference category which is Asymmetric War, Civil Wars are associated with approximately 44 percentage points less GDP decline.
+
+-   `Conflict_TypeInterstate War`: Estimate is 47 and p-value is \< 2e-16. This means Interstate War is associated with a GDP Change that is 47 percentage points higher than the reference category (Asymmetric War).
+
+-   `Conflict_TypeInterstate/Counter-insurgency`: Estimate is 42.64 and p-value is \< 2e-16. This means Interstate/Counter-insurgency conflicts are associated with a GDP Change that is 42.64 percentage points higher than Asymmetric War.
+
+-   `Pre_War_Unemployment`: Estimate is 0.160 and p-value is 0.016. This means for every 1 percentage point increase in pre-war unemployment, GDP Change increases by 0.160 percentage points (becomes less negative).
+
+-   `Most_Affected_SectorServices`: Estimate is 1.331 and p = 0.045. This indicates when services sector is most affected, GDP decline is slightly less deep.
+
+-   `Most_Affected_SectorTourism`: Estimate is 1.452 and p = 0.033. This also indicates when tourism sector is most affected, GDP decline is slightly less deep.
+
+**Model Fit**
+
+-   Training R\^2 (Multiple R-squared): 0.5307
+
+-   Test R\^2: 0.5305
+
+The model achieves a Test R\^2 of 0.53, meaning it explains approximately 53% of the variance in GDP Change on unseen data. Also, since both R\^2 are almost the same, we can say that there is good consistency and no overfitting.
+
+-   F-statistic p-value \< 2.2e-16: The model is highly significant overall.
+
+# Advanced Regression (emphasis on modelling and prediction)
+
+### Helper Function
+
+```{r}
+# Helper function to register model metrics
+register_model <- function(model_name, predictions, actual) {
+  tibble(
+    Model = model_name,
+    RMSE  = sqrt(mean((predictions - actual)^2)),
+    MAE   = mean(abs(predictions - actual)),
+    R2    = cor(predictions, actual)^2
+  )
+}
+
+# Store baseline lm result first
+results_reg <- register_model("Baseline LM", lm_pred, test_reg$GDP_Change)
+```
+
+## 1. Stepwise Selection
+
+```{r}
+# Forward stepwise selection
+step_forward <- ols_step_forward_aic(lm_model)
+step_forward
+
+# Both directions stepwise
+step_both <- ols_step_both_aic(lm_model)
+step_both
+
+# Get selected variables from best stepwise model
+step_formula <- as.formula(
+  paste("GDP_Change ~", paste(step_both$metrics$variable, collapse = " + "))
+)
+
+# Fit final stepwise model on train_reg
+step_model <- lm(step_formula, data = train_reg)
+summary(step_model)
+
+# Predict on test_reg
+step_pred <- predict(step_model, newdata = test_reg)
+
+# Register results
+results_reg <- bind_rows(
+  results_reg,
+  register_model("Stepwise", step_pred, test_reg$GDP_Change)
+)
+```
+
+Stepwise selection starts with no variables and adds them one by one based on AIC, only keeping variables that improve the model. It stops when adding more variables does not help. We can observe a big jump from intercept to Conflict_Type — by adding it R\^2 became 0.526 from 0. It selected 5 variables: `Conflict_Type`, `Pre_War_Unemployment`, `End_Year`, `Black_Market_Gap`, `War_Profiteering_Documented`. Despite a small decline of 0.003 from 0.531 to 0.528, these 5 variables make the model much simpler than the full baseline model with 26 variables. The other variables in the baseline model were essentially noise.
+
+Also, we can notice that `Conflict_TypeWorld War` is now significant (p \< 2e-16). It was not significant in the baseline model because of multicollinearity with other variables.
+
+## 2. Ridge Regression
+
+```{r}
+ridge_grid <- expand.grid(lambda = 10^seq(-3, 2, length = 100))
+
+ridge_model <- train(
+  GDP_Change ~ .,
+  data      = train_reg,
+  method    = "ridge",
+  tuneGrid  = ridge_grid,
+  trControl = trainControl(method = "cv", number = 5),
+  preProcess = c("center", "scale")
+)
+
+plot(ridge_model)
+
+cat("Best lambda (Ridge):", ridge_model$bestTune$lambda, "\n")
+
+ridge_pred <- predict(ridge_model, newdata = test_reg)
+
+results_reg <- bind_rows(
+  results_reg,
+  register_model("Ridge", ridge_pred, test_reg$GDP_Change)
+)
+```
+
+Best lambda = 0.001 which is essentially 0. This means Ridge barely shrinks the coefficients at all. The plot confirms this — RMSE is lowest at the far left (smallest lambda) and increases as lambda grows. This means regularization is not helping here — the baseline OLS coefficients are already good and shrinking them makes things worse.
+
+## 3. Lasso Regression
+
+```{r}
+lasso_grid <- expand.grid(fraction = seq(0.01, 1, length = 100))
+
+lasso_model <- train(
+  GDP_Change ~ .,
+  data       = train_reg,
+  method     = "lasso",
+  tuneGrid   = lasso_grid,
+  trControl  = trainControl(method = "cv", number = 5),
+  preProcess = c("center", "scale")
+)
+
+plot(lasso_model)
+
+cat("Best fraction (Lasso):", lasso_model$bestTune$fraction, "\n")
+
+lasso_pred <- predict(lasso_model, newdata = test_reg)
+
+results_reg <- bind_rows(
+  results_reg,
+  register_model("Lasso", lasso_pred, test_reg$GDP_Change)
+)
+```
+
+Best fraction = 0.81 which is close to 1, meaning Lasso also barely shrinks coefficients like Ridge. The plot shows RMSE keeps decreasing as fraction increases toward 1. No regularization needed.
+
+## 4. PCR
+
+```{r}
+pcr_model <- pcr(GDP_Change ~ ., 
+                 data = train_reg, 
+                 scale = TRUE, 
+                 validation = "CV")
+
+# Select optimal number of components
+best_ncomp_pcr <- selectNcomp(pcr_model, method = "onesigma", plot = TRUE)
+cat("Best number of components (PCR):", best_ncomp_pcr, "\n")
+
+# Predict
+pcr_pred <- predict(pcr_model, newdata = test_reg, ncomp = best_ncomp_pcr)
+pcr_pred <- as.vector(pcr_pred)
+
+results_reg <- bind_rows(
+  results_reg,
+  register_model("PCR", pcr_pred, test_reg$GDP_Change)
+)
+```
+
+PCR selected 25 components, which is almost all of them. This means predictors do not have a simple low-dimensional structure, so PCR needs many components to capture the variance. The plot shows RMSE stays high until around component 20 where it drops sharply.
+
+## 5. PLS
+
+```{r}
+pls_model <- plsr(GDP_Change ~ ., 
+                  data = train_reg, 
+                  scale = TRUE, 
+                  validation = "CV")
+
+# Select optimal number of components
+best_ncomp_pls <- selectNcomp(pls_model, method = "onesigma", plot = TRUE)
+cat("Best number of components (PLS):", best_ncomp_pls, "\n")
+
+# Predict
+pls_pred <- predict(pls_model, newdata = test_reg, ncomp = best_ncomp_pls)
+pls_pred <- as.vector(pls_pred)
+
+results_reg <- bind_rows(
+  results_reg,
+  register_model("PLS", pls_pred, test_reg$GDP_Change)
+)
+```
+
+PLS selected only 8 components, which is a significant difference compared to PCR's 25. PLS is much more efficient because it finds components that are directly related to `GDP_Change`, while PCR just finds components that explain variance in the predictors without caring about the target. The plot shows RMSE drops sharply until component 8 then flattens out.
+
+## Final Comparison Table
+
+```{r}
+# Remove any duplicates
+#results_reg <- results_reg |> distinct()
+
+# Print final results table
+kable(results_reg, digits = 3, 
+             caption = "Regression Model Comparison")
+
+# Bar chart comparing RMSE
+results_reg |> 
+  ggplot(aes(x = reorder(Model, RMSE), y = RMSE, fill = Model)) +
+  geom_col(alpha = 0.85) +
+  coord_flip(ylim = c(12, 13)) +
+  labs(title = "Regression Model Comparison",
+       subtitle = "Lower RMSE is better",
+       x = "Model", y = "RMSE") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+A lower RMSE indicates better predictive performance. Stepwise regression achieves the lowest RMSE (12.416) with only 5 variables, outperforming all regularization and dimensionality reduction methods. PLS performs worst with RMSE of 12.654, as compressing predictors into only 8 components loses some predictive information.
+
+# Conclusion
+
+This project applied supervised learning techniques to predict two economic outcomes of armed conflicts: the level of black market activity (`BM_High`) and GDP change (`GDP_Change`), using a random sample of 5,000 observations from the War Economic Impact dataset.
+
+## Classification
+
+The classification task proved to be challenging across all models. The binary target `BM_High` by grouping High and Dominant black market activity levels against Low and Moderate, showed very weak separability from the available predictors. Stepwise logistic regression selected only three predictors (`Pre_War_Unemployment`, `Informal_During`, `Black_Market_Gap`), and even with these, all linear and probabilistic models performed near random guessing with Balanced Accuracy around 0.50.
+
+Tree-based models performed slightly better. Both the Decision Tree and Random Forest achieved a Balanced Accuracy of 0.540 which are the only models that statistically outperformed random guessing (p \< 0.05). This suggests that black market activity has some non-linear structure that linear models cannot capture, but even the best models explained very little of the variance in the target.
+
+The variable importance plot from Random Forest identified `Start_Year`, `Conflict_Duration`, `Households_Fallen_Into_Poverty_Estimate` and `Black_Market_Gap` as the most relevant predictors, suggesting that temporal and poverty-related factors play a role in black market development during conflict.
+
+## Regression
+
+The regression task had substantially stronger results. The baseline linear model achieved a Test R\^2 of 0.53, explaining approximately 53% of the variance in GDP Change with no sign of overfitting (Training R\^2 = 0.531 vs Test R\^2 = 0.530).
+
+The most important finding from the regression analysis is that **conflict type is by far the dominant predictor of GDP decline**. Compared to Asymmetric Wars which show the deepest GDP contractions with a median around -70% , all other conflict types are associated with significantly less severe economic damage (40-47 percentage points higher GDP Change). This was confirmed consistently across both the baseline model and the stepwise model.
+
+Stepwise selection identified a compact set of 5 variables (`Conflict_Type`, `Pre_War_Unemployment`, `End_Year`, `Black_Market_Gap`, `War_Profiteering_Documented`) that achieved R\^2 = 0.528 which almost identical to the full model with 26 variables. This confirms that most predictors in the baseline model were redundant noise. Regularization methods (Ridge and Lasso) provided no improvement since there was no overfitting to correct. PCR required 25 components while PLS achieved similar performance with only 8, demonstrating PLS's efficiency in finding target-relevant components. Overall, the **Stepwise model was the best performer** with the lowest RMSE of 12.416.
