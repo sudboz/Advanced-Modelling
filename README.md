@@ -1,6 +1,6 @@
 # Advanced Modeling: Economic Impact of Armed Conflicts
  
-**Author:** Sude Boz (100569570)
+**Author:** Sude Boz 
 **Date:** March 2026
  
 ## Overview
