@@ -1,0 +1,4 @@
+*.epub linguist-vendored
+*.html linguist-detectable=true
+*.csv linguist-detectable=true
+*.Rmd linguist-detectable=true
